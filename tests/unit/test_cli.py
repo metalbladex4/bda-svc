@@ -71,3 +71,14 @@ def test_get_args(mocker, capsys):
         assert exec_missing_output.value.code == 2
 
         captured = capsys.readouterr()
+
+    # Test debug export flag
+    mocker.patch.object(sys, "argv", ["bda-svc", "--debug-export-images"])
+    args = cli.get_args()
+    assert hasattr(args, "debug_export_images")
+    assert args.debug_export_images is True
+
+    mocker.patch.object(sys, "argv", ["bda-svc"])
+    args = cli.get_args()
+    assert hasattr(args, "debug_export_images")
+    assert args.debug_export_images is False

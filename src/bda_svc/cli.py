@@ -27,4 +27,13 @@ def get_args() -> argparse.Namespace:
         help=("Path to output folder."),
     )
 
+    parser.add_argument(
+        "--debug-export-images",
+        action="store_true",
+        help=(
+            "Temporary prompt-tuning aid: save per-target overlay and crop images "
+            "next to the JSON output. Remove after prompt work is finalized."
+        ),
+    )
+
     return parser.parse_args()

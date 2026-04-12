@@ -28,6 +28,14 @@ def main() -> None:
             start_time = time.perf_counter()
             result = pipe.analyze(path)
             inference_time = time.perf_counter() - start_time
-            export.save_json(result, path, args.output, model_name, inference_time)
+            export.save_outputs(
+                result,
+                path,
+                args.output,
+                model_name,
+                inference_time=inference_time,
+                debug_export_images=args.debug_export_images,
+                crop_buffer_ratio=pipe.crop_buffer_ratio,
+            )
         except Exception as exc:
             print(f"[!] Failed to process {path}: {exc}")
