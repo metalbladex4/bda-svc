@@ -147,22 +147,22 @@ def bbox_to_pixels(
     return xmin_px, ymin_px, xmax_px, ymax_px
 
 
-def crop_with_buffer(
+def expand_box(
     image: Image.Image,
     box: tuple[int, int, int, int],
     buffer_ratio: float,
     min_size: int = 32,
-) -> Image.Image:
-    """Crop a detection box with a small padding buffer.
+) -> tuple[int, int, int, int]:
+    """Expand a detection box with buffered padding and image-bound clamping.
 
     Args:
         image: Source image.
         box: Bounding box in integer pixel coordinates.
         buffer_ratio: Fractional padding applied to width and height.
-        min_size: Minimum width and height of the returned crop.
+        min_size: Minimum width and height of the returned box.
 
     Returns:
-        Cropped image region clamped to the image bounds.
+        Expanded box clamped to the image bounds.
     """
     xmin, ymin, xmax, ymax = box
     width = xmax - xmin
@@ -211,7 +211,27 @@ def crop_with_buffer(
     right = min(image.width, right)
     bottom = min(image.height, bottom)
 
-    return image.crop((left, top, right, bottom))
+    return left, top, right, bottom
+
+
+def crop_with_buffer(
+    image: Image.Image,
+    box: tuple[int, int, int, int],
+    buffer_ratio: float,
+    min_size: int = 32,
+) -> Image.Image:
+    """Crop a detection box with a small padding buffer.
+
+    Args:
+        image: Source image.
+        box: Bounding box in integer pixel coordinates.
+        buffer_ratio: Fractional padding applied to width and height.
+        min_size: Minimum width and height of the returned crop.
+
+    Returns:
+        Cropped image region clamped to the image bounds.
+    """
+    return image.crop(expand_box(image, box, buffer_ratio, min_size=min_size))
 
 
 def resize_for_vlm(image: Image.Image, max_side: int) -> Image.Image:

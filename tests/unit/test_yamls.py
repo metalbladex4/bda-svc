@@ -14,6 +14,8 @@ EXPECTED_DETECTION_VLM_KEYS = {
     "temperature",
     "max_image_size",
     "crop_buffer_ratio",
+    "refinement_enabled",
+    "refinement_roi_buffer_ratio",
 }
 EXPECTED_ASSESSMENT_VLM_KEYS = {"model", "temperature", "max_image_size"}
 EXPECTED_PROMPT_KEYS = {"system", "detect_objects", "assess_damage", "summarize_scene"}
@@ -41,6 +43,8 @@ def test_config_detection_vlm_types() -> None:
     assert isinstance(detection["temperature"], float)
     assert isinstance(detection["max_image_size"], int)
     assert isinstance(detection["crop_buffer_ratio"], float)
+    assert isinstance(detection["refinement_enabled"], bool)
+    assert isinstance(detection["refinement_roi_buffer_ratio"], float)
 
 
 def test_config_assessment_vlm_types() -> None:

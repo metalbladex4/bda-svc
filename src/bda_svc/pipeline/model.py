@@ -15,6 +15,7 @@ from bda_svc.pipeline.utilities import (
     bbox_to_pixels,
     crop_with_buffer,
     draw_box_overlay,
+    expand_box,
     format_detection_doctrine,
     format_pda_doctrine,
     load_yaml,
@@ -48,6 +49,8 @@ class BDAPipeline:
 
     def __init__(self) -> None:
         """Initialize configuration, doctrine, prompts, and backends."""
+        self.last_debug_info: dict[str, object] = {}
+
         # Load yamls
         self.config = load_yaml(CONFIG_PATH)
         self.doctrine = load_yaml(DOCTRINE_PATH)
@@ -67,6 +70,12 @@ class BDAPipeline:
         self.detection_temperature = float(detection_cfg["temperature"])
         self.detection_max_image_size = int(detection_cfg["max_image_size"])
         self.crop_buffer_ratio = float(detection_cfg["crop_buffer_ratio"])
+        self.detection_refinement_enabled = bool(
+            detection_cfg.get("refinement_enabled", False)
+        )
+        self.detection_refinement_roi_buffer_ratio = float(
+            detection_cfg.get("refinement_roi_buffer_ratio", self.crop_buffer_ratio)
+        )
         self.detection_vlm = OllamaVLM(model=detection_model)
 
         # Load assessment backend
@@ -88,7 +97,17 @@ class BDAPipeline:
             Detection records with crops attached.
         """
         # Get detections, bounding boxes are stored in pixel coordinates
-        detections = self._vlm_detections(image)
+        detections, debug_record = self._vlm_detections(image)
+
+        if self.detection_refinement_enabled and detections:
+            detections, refinement_debug = self._refine_detections(image, detections)
+            debug_record["refinement"] = refinement_debug
+
+        debug_record["final_detections"] = [
+            {"target_type": det.label, "pixel_bbox": list(det.bbox)}
+            for det in detections
+        ]
+        self.last_debug_info["detection"] = debug_record
 
         # Attach padded image crops to detections
         detections_with_crops = [
@@ -104,22 +123,29 @@ class BDAPipeline:
         detections_with_crops.sort(key=lambda d: (d.label.lower(), d.bbox[0]))
         return detections_with_crops
 
-    def _vlm_detections(self, image: Image.Image) -> list[Detection]:
+    def _vlm_detections(
+        self,
+        image: Image.Image,
+        *,
+        categories: list[str] | None = None,
+    ) -> tuple[list[Detection], dict[str, object]]:
         """Use the detection VLM to produce object detections.
 
         Args:
             image: PIL image to analyze.
+            categories: Optional doctrinal categories to constrain detection.
 
         Returns:
-            A list of parsed detections in raw pixel coordinates.
+            Parsed detections in raw pixel coordinates plus a debug record.
         """
+        categories = categories or self.categories
         prompt = self.detect_objects_prompt_template
 
         # Format prompt with doctrinal categories
-        categories = ", ".join(self.categories)
-        prompt = prompt.replace("{categories}", categories)
+        category_text = ", ".join(categories)
+        prompt = prompt.replace("{categories}", category_text)
         prompt = prompt.replace(
-            "{detection_guidance}", format_detection_doctrine(self.categories)
+            "{detection_guidance}", format_detection_doctrine(categories)
         )
 
         # Format prompt with bbox format
@@ -158,19 +184,40 @@ class BDAPipeline:
             temperature=self.detection_temperature,
         )
 
+        debug_record: dict[str, object] = {
+            "bbox_convention": self.detection_bbox_convention,
+            "original_image_size": [image.width, image.height],
+            "model_image_size": [vlm_image.width, vlm_image.height],
+            "raw_response": response,
+        }
+
         # Fail safely
         try:
             payload = repair_json(response)
+            debug_record["repaired_response"] = payload
             payload = DetectionResponse.model_validate_json(payload)
-        except ValidationError:
-            return []
+        except ValidationError as exc:
+            debug_record["validation_error"] = str(exc)
+            return [], debug_record
+
+        debug_record["parsed_detections"] = payload.model_dump()["detections"]
 
         # Return list of detections
         detections = []
-        for item in payload.detections:
+        kept_detections = []
+        rejected_detections = []
+        for index, item in enumerate(payload.detections):
             # Validate target_type is doctrinal
             target_type = item.target_type.strip().lower()
-            if target_type not in self.categories:
+            if target_type not in categories:
+                rejected_detections.append(
+                    {
+                        "index": index,
+                        "reason": "invalid_target_type",
+                        "target_type": item.target_type,
+                        "raw_bbox": item.bbox,
+                    }
+                )
                 continue
 
             # Validate bounding box is valid
@@ -181,11 +228,158 @@ class BDAPipeline:
                 bbox_convention=self.detection_bbox_convention,
             )
             if pixel_box is None:
+                rejected_detections.append(
+                    {
+                        "index": index,
+                        "reason": "invalid_bbox",
+                        "target_type": target_type,
+                        "raw_bbox": item.bbox,
+                    }
+                )
                 continue
 
             detections.append(Detection(label=target_type, bbox=pixel_box))
+            kept_detections.append(
+                {
+                    "index": index,
+                    "target_type": target_type,
+                    "raw_bbox": item.bbox,
+                    "pixel_bbox": list(pixel_box),
+                }
+            )
 
-        return detections
+        debug_record["kept_detections"] = kept_detections
+        if rejected_detections:
+            debug_record["rejected_detections"] = rejected_detections
+        return detections, debug_record
+
+    def _refine_detections(
+        self,
+        image: Image.Image,
+        detections: list[Detection],
+    ) -> tuple[list[Detection], dict[str, object]]:
+        """Re-run detection inside expanded ROIs to refine coarse boxes.
+
+        Args:
+            image: Full-scene source image.
+            detections: First-pass detections in scene pixel coordinates.
+
+        Returns:
+            Refined detections plus per-attempt debug data.
+        """
+        attempts: list[dict[str, object]] = []
+        refined_detections: list[Detection] = []
+
+        for index, detection in enumerate(detections):
+            roi_box = expand_box(
+                image,
+                detection.bbox,
+                self.detection_refinement_roi_buffer_ratio,
+            )
+            roi_image = image.crop(roi_box)
+            roi_detections, roi_debug = self._vlm_detections(
+                roi_image,
+                categories=[detection.label],
+            )
+
+            attempt: dict[str, object] = {
+                "index": index,
+                "target_type": detection.label,
+                "original_bbox": list(detection.bbox),
+                "roi_bbox": list(roi_box),
+                "roi_size": [roi_image.width, roi_image.height],
+                "detection_debug": roi_debug,
+            }
+
+            if not roi_detections:
+                attempt["decision"] = "kept_original_no_refined_detection"
+                refined_detections.append(detection)
+                attempts.append(attempt)
+                continue
+
+            translated_candidates = []
+            for candidate in roi_detections:
+                translated_box = self._translate_box(candidate.bbox, roi_box)
+                translated_candidates.append(
+                    {
+                        "target_type": candidate.label,
+                        "pixel_bbox": list(translated_box),
+                        "iou_vs_original": self._bbox_iou(
+                            translated_box,
+                            detection.bbox,
+                        ),
+                        "area": self._bbox_area(translated_box),
+                    }
+                )
+
+            attempt["translated_candidates"] = translated_candidates
+            best_candidate = max(
+                translated_candidates,
+                key=lambda item: (item["iou_vs_original"], item["area"]),
+            )
+
+            if best_candidate["iou_vs_original"] <= 0.0:
+                attempt["decision"] = "kept_original_no_overlap"
+                refined_detections.append(detection)
+            else:
+                attempt["decision"] = "selected_refined_bbox"
+                attempt["selected_bbox"] = best_candidate["pixel_bbox"]
+                refined_detections.append(
+                    Detection(
+                        label=detection.label,
+                        bbox=tuple(best_candidate["pixel_bbox"]),
+                    )
+                )
+
+            attempts.append(attempt)
+
+        return refined_detections, {
+            "enabled": True,
+            "roi_buffer_ratio": self.detection_refinement_roi_buffer_ratio,
+            "attempts": attempts,
+        }
+
+    @staticmethod
+    def _translate_box(
+        box: tuple[int, int, int, int],
+        roi_box: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        """Translate an ROI-local box back into scene coordinates."""
+        left, top, _, _ = roi_box
+        xmin, ymin, xmax, ymax = box
+        return xmin + left, ymin + top, xmax + left, ymax + top
+
+    @staticmethod
+    def _bbox_area(box: tuple[int, int, int, int]) -> int:
+        """Return bounding-box area."""
+        xmin, ymin, xmax, ymax = box
+        return max(0, xmax - xmin) * max(0, ymax - ymin)
+
+    @classmethod
+    def _bbox_iou(
+        cls,
+        box_a: tuple[int, int, int, int],
+        box_b: tuple[int, int, int, int],
+    ) -> float:
+        """Return intersection-over-union between two boxes."""
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+
+        inter_left = max(ax1, bx1)
+        inter_top = max(ay1, by1)
+        inter_right = min(ax2, bx2)
+        inter_bottom = min(ay2, by2)
+
+        inter_w = max(0, inter_right - inter_left)
+        inter_h = max(0, inter_bottom - inter_top)
+        inter_area = inter_w * inter_h
+        if inter_area == 0:
+            return 0.0
+
+        union_area = cls._bbox_area(box_a) + cls._bbox_area(box_b) - inter_area
+        if union_area <= 0:
+            return 0.0
+        return inter_area / union_area
 
     def assess_detection(
         self,
@@ -304,9 +498,13 @@ class BDAPipeline:
         Returns:
             Final image-level BDA payload.
         """
+        self.last_debug_info = {}
         with Image.open(Path(image_path)).convert("RGB") as image:
             detections = self.detect_objects(image)
             targets = [self.assess_detection(d, scene_image=image) for d in detections]
             targets = [t for t in targets if t is not None]
             scene_summary = self.summarize_scene(image, targets)
-            return self.consolidate_results(targets, scene_summary)
+            result = self.consolidate_results(targets, scene_summary)
+            if self.last_debug_info:
+                result["_debug"] = self.last_debug_info
+            return result

@@ -203,6 +203,11 @@ def test_detect_objects_fail_safe(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # A bad detection should return empty list instead of an exception
     assert detections == []
+    assert (
+        pipeline.last_debug_info["detection"]["raw_response"]
+        == '[{"target_type": "buildings"}]'
+    )
+    assert "validation_error" in pipeline.last_debug_info["detection"]
 
 
 def test_detect_objects_skips_bad_detections(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,6 +249,58 @@ def test_detect_objects_skips_bad_detections(monkeypatch: pytest.MonkeyPatch) ->
     assert detections[0].label == "buildings"
     assert detections[0].bbox == (400, 200, 2000, 1000)
     assert detections[0].crop is not None
+
+
+def test_detect_objects_refines_bbox_inside_roi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use a second pass inside an ROI when refinement is enabled."""
+    patch_config_overrides(
+        monkeypatch,
+        {
+            "detection_vlm": {
+                "bbox_convention": "xyxy_1000",
+                "max_image_size": 4096,
+                "refinement_enabled": True,
+                "refinement_roi_buffer_ratio": 0.25,
+            }
+        },
+    )
+
+    detection_vlm = FakeVLM(
+        [
+            json.dumps(
+                {
+                    "detections": [
+                        {"target_type": "buildings", "bbox": [100, 100, 500, 500]}
+                    ]
+                }
+            ),
+            json.dumps(
+                {
+                    "detections": [
+                        {"target_type": "buildings", "bbox": [200, 200, 700, 700]}
+                    ]
+                }
+            ),
+        ]
+    )
+    patch_backends(
+        monkeypatch,
+        detection_vlm=detection_vlm,
+        assessment_vlm=FakeVLM(),
+        model_names=[],
+    )
+
+    pipeline = pipeline_model.BDAPipeline()
+    detections = pipeline.detect_objects(Image.new("RGB", (4000, 2000)))
+
+    assert len(detections) == 1
+    assert detections[0].bbox == (480, 240, 1680, 840)
+    refinement = pipeline.last_debug_info["detection"]["refinement"]
+    assert refinement["enabled"] is True
+    assert refinement["attempts"][0]["decision"] == "selected_refined_bbox"
+    assert refinement["attempts"][0]["selected_bbox"] == [480, 240, 1680, 840]
 
 
 # ----------------------------------------------------------------------
@@ -400,6 +457,13 @@ def test_analyze_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         "brief_supporting_logic": "roof collapse; wall breach",
         "bounding_box": [40, 40, 120, 80],
     }
+    assert result["_debug"]["detection"]["bbox_convention"] == "xyxy_1000"
+    assert result["_debug"]["detection"]["kept_detections"][0]["pixel_bbox"] == [
+        40,
+        40,
+        120,
+        80,
+    ]
 
 
 def test_analyze_no_target_path(
@@ -432,3 +496,5 @@ def test_analyze_no_target_path(
         "brief_supporting_logic": "No visible targets in image.",
         "bounding_box": [0, 0, 0, 0],
     }
+    assert result["_debug"]["detection"]["raw_response"] == "Not valid targets"
+    assert "validation_error" in result["_debug"]["detection"]

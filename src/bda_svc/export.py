@@ -139,13 +139,41 @@ def save_debug_images(
             wrote_any = True
 
     if wrote_any:
-        print(
-            f"[*] Exported temporary debug images: {debug_dir} "
-            "(remove after prompt tuning is finalized)"
-        )
         return debug_dir
 
     return None
+
+
+def save_debug_payloads(
+    bda: dict,
+    image_path: str | Path,
+    output_path: str | Path | None,
+    *,
+    timestamp: str,
+) -> Path | None:
+    """Save temporary pipeline debug payloads alongside visual debug artifacts.
+
+    Args:
+        bda: BDA analysis dictionary.
+        image_path: Path to the original image.
+        output_path: Base output folder.
+        timestamp: Shared timestamp used for sibling JSON/debug artifacts.
+
+    Returns:
+        Path to the debug directory, or `None` if there was no debug payload to
+        export.
+    """
+    image_path = Path(image_path)
+    output_path = Path(output_path or constants.DEFAULT_OUTPUT_PATH)
+    debug_payload = bda.get("_debug")
+    if not isinstance(debug_payload, dict) or not debug_payload:
+        return None
+
+    debug_dir = output_path / f"{image_path.stem}_{timestamp}_debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    debug_path = debug_dir / "pipeline_debug.json"
+    debug_path.write_text(json.dumps(debug_payload, indent=4), encoding="utf-8")
+    return debug_dir
 
 
 def save_outputs(
@@ -158,7 +186,7 @@ def save_outputs(
     debug_export_images: bool = False,
     crop_buffer_ratio: float = 0.0,
 ) -> Path:
-    """Save the main JSON report and optional temporary debug image exports.
+    """Save the main JSON report and optional temporary debug exports.
 
     Args:
         bda: BDA analysis dictionary.
@@ -166,7 +194,8 @@ def save_outputs(
         output_path: Path of output folder. Uses default if None/empty.
         model_name: Model name metadata.
         inference_time: Inference time metadata for the main JSON report.
-        debug_export_images: Whether to save temporary overlay/crop artifacts.
+        debug_export_images: Whether to save temporary overlay/crop artifacts
+            and any available pipeline debug payloads.
         crop_buffer_ratio: Padding ratio applied to saved debug crops.
 
     Returns:
@@ -183,12 +212,24 @@ def save_outputs(
     )
 
     if debug_export_images:
-        save_debug_images(
+        debug_dir = save_debug_payloads(
+            bda,
+            image_path,
+            output_path,
+            timestamp=timestamp,
+        )
+        image_debug_dir = save_debug_images(
             bda,
             image_path,
             output_path,
             timestamp=timestamp,
             crop_buffer_ratio=crop_buffer_ratio,
         )
+        if debug_dir or image_debug_dir:
+            print(
+                f"[*] Exported temporary debug artifacts: "
+                f"{debug_dir or image_debug_dir} "
+                "(remove after prompt tuning is finalized)"
+            )
 
     return json_path

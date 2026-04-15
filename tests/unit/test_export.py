@@ -174,6 +174,40 @@ def test_save_outputs_with_debug_images_writes_overlay_and_crop(tmp_path) -> Non
     assert crop.size == (32, 32)
 
 
+def test_save_outputs_with_debug_payload_writes_pipeline_debug_json(tmp_path) -> None:
+    """Debug export should persist raw pipeline debug payloads when present."""
+    image_path = tmp_path / "scene.jpg"
+    Image.new("RGB", (100, 100), color="white").save(image_path)
+
+    bda = make_bda()
+    bda["_debug"] = {
+        "detection": {
+            "bbox_convention": "xyxy_1000",
+            "raw_response": '{"detections": []}',
+            "parsed_detections": [],
+        }
+    }
+
+    export.save_outputs(
+        bda,
+        image_path,
+        tmp_path / "out",
+        "detection=model;assessment=model",
+        debug_export_images=True,
+        crop_buffer_ratio=0.25,
+    )
+
+    debug_dirs = list((tmp_path / "out").glob("*_debug"))
+    assert len(debug_dirs) == 1
+
+    debug_payload_path = debug_dirs[0] / "pipeline_debug.json"
+    assert debug_payload_path.exists()
+
+    debug_payload = json.loads(debug_payload_path.read_text(encoding="utf-8"))
+    assert debug_payload["detection"]["bbox_convention"] == "xyxy_1000"
+    assert debug_payload["detection"]["raw_response"] == '{"detections": []}'
+
+
 def test_save_outputs_skips_invalid_debug_bbox(tmp_path) -> None:
     """Invalid placeholder boxes should not produce debug images."""
     image_path = tmp_path / "scene.jpg"

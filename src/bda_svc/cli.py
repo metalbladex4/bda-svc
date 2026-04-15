@@ -31,8 +31,9 @@ def get_args() -> argparse.Namespace:
         "--debug-export-images",
         action="store_true",
         help=(
-            "Temporary prompt-tuning aid: save per-target overlay and crop images "
-            "next to the JSON output. Remove after prompt work is finalized."
+            "Temporary prompt-tuning aid: save per-target overlay/crop images "
+            "and raw pipeline debug payloads next to the JSON output. Remove "
+            "after prompt work is finalized."
         ),
     )
 
